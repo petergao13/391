@@ -3,9 +3,9 @@
 # Usage:
 #   make          - Build all benchmarks
 #   make clean    - Remove build artifacts
-#   make install  - Copy binaries to ../usr/bin/
 #
 # The benchmarks link against the user library from ../usr/
+# Built binaries are placed in bin/ - add them directly to your KTFS image
 
 TOOLPREFIX = riscv64-unknown-elf-
 
@@ -71,10 +71,6 @@ $(PROGS_DIR)/%.o: $(PROGS_DIR)/%.c $(COMMON_DIR)/bench.h
 $(BIN_DIR)/%: $(PROGS_DIR)/%.o $(BENCH_COMMON) $(ULIB_OBJS) | $(BIN_DIR)
 	$(LD) -T $(ULIB_LD) -o $@ $^
 
-# Install to usr/bin for inclusion in filesystem
-install: all
-	cp $(BIN_DIR)/* $(USR_DIR)/bin/
-
 # Clean build artifacts
 clean:
 	rm -rf $(BIN_DIR)
@@ -86,7 +82,7 @@ $(ULIB_OBJS):
 	$(MAKE) -C $(USR_DIR) $(notdir $@)
 
 # Phony targets
-.PHONY: all clean install
+.PHONY: all clean
 
 # Dependencies
 $(PROGS_DIR)/bench_fs.o: $(COMMON_DIR)/bench.h

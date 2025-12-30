@@ -46,16 +46,13 @@ bench/
 cd bench
 make
 
-# Install to usr/bin/ for filesystem inclusion
-make install
-
 # Clean build artifacts
 make clean
 ```
 
 ### Adding to KTFS Image
 
-After building, add the benchmarks to your filesystem image:
+After building, add the benchmarks from `bench/bin/` to your filesystem image:
 
 ```bash
 cd ../util
@@ -69,8 +66,6 @@ cd ../util
     ../bench/bin/bench_mem \
     ../bench/bin/bench_cache
 ```
-
-Or use `make install` to copy binaries to `usr/bin/` and include them in your normal build.
 
 ## Running Benchmarks
 
