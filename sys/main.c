@@ -21,6 +21,12 @@
 #include "thread.h"
 #include "timer.h"
 #include "elf.h"
+#include "riscv.h"
+
+static inline unsigned long long ticks_to_us(unsigned long long ticks) {
+    // TIMER_FREQ is in Hz (ticks/sec)
+    return (ticks * 1000000ULL) / (unsigned long long)TIMER_FREQ;
+}
 
 #define INITEXE "shell"  // FIXME
 
@@ -43,6 +49,7 @@ static void run_init(void);
 
 void main(void) {
     extern char _kimg_end[];  // provided by kernel.ld
+    unsigned long long boot_t0 = rdtime();
     console_init();
     intrmgr_init();
     devmgr_init();
@@ -54,6 +61,10 @@ void main(void) {
     enable_interrupts();
     mount_cdrive();
     timer_init();
+    kprintf("[BOOT] kernel init: %llu us (%llu ticks @ %u Hz)\n",
+            ticks_to_us(rdtime() - boot_t0),
+            (unsigned long long)(rdtime() - boot_t0),
+            (unsigned)TIMER_FREQ);
     run_init();
 }
 
