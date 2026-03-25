@@ -5,64 +5,244 @@
 
 #define BUFSIZE 1024
 #define MAXARGS 8
+#define MAXCMDS 8
 
-struct prog{
+static int is_space(char c) {
+	return (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+}
+
+static void trim_eol(char *s) {
+	size_t n = strlen(s);
+	while (n > 0) {
+		char c = s[n - 1];
+		if (c != '\n' && c != '\r') {
+			break;
+		}
+		s[n - 1] = '\0';
+		n--;
+	}
+}
+
+static char *dup_range(const char *start, size_t n) {
+	char *out = malloc(n + 1);
+	if (!out) return NULL;
+	memcpy(out, start, n);
+	out[n] = '\0';
+	return out;
+}
+
+struct command {
 	int argc;
-	char * argv[MAXARGS + 1];
-	struct prog * next;
+	char *argv[MAXARGS + 1]; // argv[argc] == NULL
+	char *infile;
+	char *outfile;
 };
 
-/**
-* @brief parses a set of files and returns the operation after that set of files: <, >, |, '\0',
-* @param fd file descriptor number
-* @param path string path to file
-* @return new buf head
-*/
-char * parse(char* buf, int * argc, char** argv, char * op) {
-	*argc = 0;
-	char * head;
-	char * tail = buf;
-	for(;;){
-		head = tail;
-		while(*head == ' '){
-			head++;
-		}
-		tail = head;
-		while(*tail != ' ' && *tail != '\0' && *tail != FOUT && *tail != FIN && *tail != PIPE){
-			tail++;
-		}
-		*op = *tail;
-		*tail = '\0';
-		tail++;
-		if(*argc < 8){
-			argv[*argc] = head;
-			*argc += 1;
-		}
-		else{
-			*argc = -1;
-			return NULL;
-		}
-		if(*op == ' '){
-			while(*tail == ' '){
-				tail++;
+static void free_command(struct command *cmd) {
+	for (int i = 0; i < cmd->argc; i++) {
+		free(cmd->argv[i]);
+		cmd->argv[i] = NULL;
+	}
+	cmd->argc = 0;
+	if (cmd->infile) {
+		free(cmd->infile);
+		cmd->infile = NULL;
+	}
+	if (cmd->outfile) {
+		free(cmd->outfile);
+		cmd->outfile = NULL;
+	}
+}
+
+static char *dup_resolve_prog(const char *word) {
+	if (strchr(word, '/') != NULL) {
+		return strdup(word);
+	}
+	// Default user commands live in c/.
+	char temp[strlen(word) + 3];
+	snprintf(temp, sizeof(temp), "c/%s", word);
+	return strdup(temp);
+}
+
+static int parse_line(char *buf, struct command *cmds, int *cmd_count_out) {
+	// Parse into up to MAXCMDS pipeline stages.
+	for (int i = 0; i < MAXCMDS; i++) {
+		cmds[i].argc = 0;
+		for (int j = 0; j < MAXARGS + 1; j++) cmds[i].argv[j] = NULL;
+		cmds[i].infile = NULL;
+		cmds[i].outfile = NULL;
+	}
+
+	int cmd_count = 1;
+	char *p = buf;
+
+	while (*p != '\0') {
+		while (is_space(*p)) p++;
+		if (*p == '\0') break;
+
+		if (*p == PIPE) {
+			// Finalize current stage.
+			if (cmds[cmd_count - 1].argc == 0) {
+				printf("Invalid command before '|'\n");
+				return -1;
 			}
-			if(*tail == '\0' || *tail == FOUT || *tail == FIN || *tail == PIPE){
-				*op = *tail;
-				tail++;
+			if (cmd_count >= MAXCMDS) {
+				printf("Too many pipeline commands\n");
+				return -1;
 			}
+			cmd_count++;
+			p++; // consume '|'
+			continue;
 		}
-		if(*op == '\0' || *op == FOUT || *op == FIN || *op == PIPE){
-			return tail;
+
+		if (*p == FIN || *p == FOUT) {
+			char op = *p;
+			p++; // consume '<' or '>'
+			while (is_space(*p)) p++;
+			if (*p == '\0') {
+				printf("Missing file after redirection\n");
+				return -1;
+			}
+			const char *start = p;
+			while (*p != '\0' && !is_space(*p) && *p != FIN && *p != FOUT && *p != PIPE) p++;
+			size_t n = p - start;
+			if (n == 0) {
+				printf("Missing file after redirection\n");
+				return -1;
+			}
+			char *file = dup_range(start, n);
+			if (!file) {
+				printf("Out of memory\n");
+				return -1;
+			}
+			if (op == FIN) cmds[cmd_count - 1].infile = file;
+			else cmds[cmd_count - 1].outfile = file;
+			continue;
+		}
+
+		// Parse a word => argv token.
+		const char *start = p;
+		while (*p != '\0' && !is_space(*p) && *p != FIN && *p != FOUT && *p != PIPE) p++;
+		size_t n = p - start;
+		if (n == 0) continue;
+		if (cmds[cmd_count - 1].argc >= MAXARGS) {
+			printf("Invalid number of arguments\n");
+			return -1;
+		}
+		char *word = dup_range(start, n);
+		if (!word) {
+			printf("Out of memory\n");
+			return -1;
+		}
+
+		if (cmds[cmd_count - 1].argc == 0) {
+			// Resolve program path from the first argv token.
+			char *resolved = dup_resolve_prog(word);
+			free(word);
+			if (!resolved) return -1;
+			cmds[cmd_count - 1].argv[0] = resolved;
+		} else {
+			cmds[cmd_count - 1].argv[cmds[cmd_count - 1].argc] = word;
+		}
+		cmds[cmd_count - 1].argc++;
+	}
+
+	if (cmds[cmd_count - 1].argc == 0) {
+		printf("Invalid empty command\n");
+		return -1;
+	}
+
+	// NULL terminate argv arrays.
+	for (int i = 0; i < cmd_count; i++) {
+		cmds[i].argv[cmds[i].argc] = NULL;
+	}
+	*cmd_count_out = cmd_count;
+	return 0;
+}
+
+static void exec_pipeline(struct command *cmds, int cmd_count) {
+	int pipe_w[MAXCMDS];
+	int pipe_r[MAXCMDS];
+	for (int i = 0; i < MAXCMDS; i++) {
+		pipe_w[i] = -1;
+		pipe_r[i] = -1;
+	}
+
+	// Create pipes for N commands.
+	for (int i = 0; i < cmd_count - 1; i++) {
+		(void)_pipe(&pipe_w[i], &pipe_r[i]);
+	}
+
+	for (int i = 0; i < cmd_count; i++) {
+		int child_tid = _fork();
+		if (child_tid == 0) {
+			// Redirect STDIN for this stage.
+			if (cmds[i].infile != NULL) {
+				int fd = _open(-1, cmds[i].infile);
+				if (fd < 0) {
+					dprintf(2, "Cannot open input file: %s\n", cmds[i].infile);
+					_exit();
+				}
+				_close(STDIN);
+				_uiodup(fd, STDIN);
+				_close(fd);
+			} else if (i > 0) {
+				_close(STDIN);
+				_uiodup(pipe_r[i - 1], STDIN);
+			}
+
+			// Redirect STDOUT for this stage.
+			if (cmds[i].outfile != NULL) {
+				int fd = _open(-1, cmds[i].outfile);
+				if (fd < 0) {
+					if (_fscreate(cmds[i].outfile) < 0) {
+						dprintf(2, "Could not create file: %s\n", cmds[i].outfile);
+						_exit();
+					}
+					fd = _open(-1, cmds[i].outfile);
+				}
+				if (fd < 0) {
+					dprintf(2, "Could not open file: %s\n", cmds[i].outfile);
+					_exit();
+				}
+				_close(STDOUT);
+				_uiodup(fd, STDOUT);
+				_close(fd);
+			} else if (i < cmd_count - 1) {
+				_close(STDOUT);
+				_uiodup(pipe_w[i], STDOUT);
+			}
+
+			// Close all pipe fds (children should not keep extra ends open).
+			for (int j = 0; j < cmd_count - 1; j++) {
+				if (pipe_r[j] >= 0) _close(pipe_r[j]);
+				if (pipe_w[j] >= 0) _close(pipe_w[j]);
+			}
+
+			int child_fd = _open(-1, cmds[i].argv[0]);
+			if (child_fd < 0) {
+				dprintf(2, "Cannot open specified file\n");
+				_exit();
+			}
+			_exec(child_fd, cmds[i].argc, cmds[i].argv);
+			_exit();
 		}
 	}
-	return tail;
+
+	// Parent: close all pipes so readers see EOF.
+	for (int i = 0; i < cmd_count - 1; i++) {
+		if (pipe_r[i] >= 0) _close(pipe_r[i]);
+		if (pipe_w[i] >= 0) _close(pipe_w[i]);
+	}
+
+	while (_wait(0) > 0) {
+		// Drain all children.
+	}
 }
 
 int main()
 {
     char buf[BUFSIZE];
-	int argc;
-	char* argv[MAXARGS + 1];
 
   	_open(CONSOLEOUT, "dev/uart1");		// console device
 	_close(STDIN);              		// close any existing stdin
@@ -77,6 +257,8 @@ int main()
 		printf("LUMON OS> ");
 		getsn(buf, BUFSIZE - 1);
 
+		trim_eol(buf);
+
 		if (0 == strcmp(buf, "exit")) {
 			_exit();
 		}
@@ -85,156 +267,16 @@ int main()
 			continue;
 		}
 
-		// FIXME
-		// Call your parse function and exec the user input
-		struct prog * prog_list_head = NULL;
-		struct prog * prog_list_tail = NULL;
-		struct prog * prog_in = NULL;
-		struct prog * prog_out = NULL;
-		struct prog * prog = NULL;
-		char next_op = -1;
-		char prev_op = -1;
-		char * buffer = buf;
-		int retVal;
-
-		// create prog structs for each program and add to appropriate list
-		while(next_op != '\0'){
-			buffer = parse(buffer, &argc, argv, &next_op);
-			if(argc == -1){
-				printf("Invalid number of arguments\n");
-				break;
-			}
-
-			// make and initialize prog
-			prog = calloc(1, sizeof(struct prog));
-			prog->argc = argc;
-			prog->next = NULL;
-			// copy argv
-			for(int i = 0; i < argc; i++){
-				if(i == 0 && strchr(argv[0], '/') == NULL && prev_op != FIN && prev_op != FOUT){
-					char temp[strlen(argv[i])+3];
-					snprintf(temp, sizeof(temp), "c/%s", argv[i]);
-					prog->argv[i] = strdup(temp);
-				}
-				else{
-					prog->argv[i] = strdup(argv[i]);
-				}
-			}
-			prog->argv[argc] = NULL;
-
-			// add program to prog_list
-			if(prev_op != FIN && prev_op != FOUT){
-				if(prog_list_tail == NULL){
-					prog_list_head = prog;
-				}
-				else{
-					prog_list_tail->next = prog;
-				}
-				prog_list_tail = prog;
-			}
-			// add program to prog_in
-			else if(prev_op == FIN){
-				prog_in = prog;
-			}
-			// add program to prog_out
-			else if(prev_op == FOUT){
-				prog_out = prog;
-			}
-			prev_op = next_op;
-		}
-
-		if(argc == -1){
+		struct command cmds[MAXCMDS];
+		int cmd_count = 0;
+		if (parse_line(buf, cmds, &cmd_count) < 0) {
+			// parse_line prints an error message; just continue.
+			for (int i = 0; i < MAXCMDS; i++) free_command(&cmds[i]);
 			continue;
 		}
 
-		int wfd = -1;
-		int rfd = -1;
+		exec_pipeline(cmds, cmd_count);
 
-		prog = prog_list_head;
-		while(prog != NULL){
-			_close(STDIN);
-			_uiodup(CONSOLEOUT, STDIN);
-			_close(STDOUT);
-			_uiodup(CONSOLEOUT, STDOUT);
-			if(prog == prog_list_head && prog == prog_list_tail){
-				// in
-				if(prog_in != NULL){
-					_close(STDIN);
-					_open(STDIN, prog_in->argv[0]);
-				}
-				// out
-				if(prog_out != NULL){
-					_close(STDOUT);
-					retVal = _open(STDOUT, prog_out->argv[0]);
-					if(retVal < 0){
-						retVal = _fscreate(prog_out->argv[0]);
-						if(retVal < 0){
-							dprintf(2, "Could not create file: %s\n", prog_out->argv[0]);
-							break;
-						}
-						_open(STDOUT, prog_out->argv[0]);
-					}
-				}
-			}
-			else if(prog == prog_list_head){
-				// in
-				if(prog_in != NULL){
-					_close(STDIN);
-					_open(STDIN, prog_in->argv[0]);
-				}
-				// out
-				_pipe(&wfd, &rfd);
-				_close(STDOUT);
-				_uiodup(wfd, STDOUT);
-				_close(wfd);
-				wfd = -1;
-			}
-			else if(prog == prog_list_tail){
-				// in
-				_close(STDIN);
-				_uiodup(rfd, STDIN);
-				_close(rfd);
-				rfd = -1;
-				// out
-				if(prog_out != NULL){
-					_close(STDOUT);
-					retVal = _open(STDOUT, prog_out->argv[0]);
-					if(retVal < 0){
-						retVal = _fscreate(prog_out->argv[0]);
-						if(retVal < 0){
-							dprintf(2, "Could not create file: %s\n", prog_out->argv[0]);
-							break;
-						}
-						_open(STDOUT, prog_out->argv[0]);
-					}
-				}
-			}
-			else{
-				// in
-				_close(STDIN);
-				_uiodup(rfd, STDIN);
-				_close(rfd);
-				rfd = -1;
-				// out
-				_pipe(&wfd, &rfd);
-				_close(STDOUT);
-				_uiodup(wfd, STDOUT);
-				_close(wfd);
-				wfd = -1;
-			}
-			int child_fd = _open(-1, prog->argv[0]);
-			if(child_fd < 0){
-				dprintf(2, "Cannot open specified file\n");
-			}
-			else{
-				int child_tid = _fork();
-				if(child_tid == 0){
-					_exec(child_fd, prog->argc, prog->argv);
-				}
-				_close(child_fd);
-			}
-			prog = prog->next;
-		}
-		while(_wait(0) > 0);
+		for (int i = 0; i < cmd_count; i++) free_command(&cmds[i]);
 	}
 }

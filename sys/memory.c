@@ -635,7 +635,7 @@ void *alloc_phys_pages(unsigned int cnt) {
     }
     // panic if no chunks big enough
     else if(best_curr->pagecnt < cnt){
-        panic("😋😋😋😋😋🤪🤪🤪🤪out of memory type shi🤪🤪🤪🤪🤪😋😋😋😋😋😋");
+        panic("out of memory");
     }
     
     memset(best_curr, 0, cnt * PAGE_SIZE);
@@ -643,15 +643,43 @@ void *alloc_phys_pages(unsigned int cnt) {
 }
 
 void free_phys_pages(void *pp, unsigned int cnt) {
-    // FIXME
     if (pp == NULL || cnt == 0) {
         return;
     }
 
-    struct page_chunk * temp = pp;
+    // Insert the freed chunk into the free list ordered by address, then
+    // coalesce adjacent chunks to reduce fragmentation.
+    struct page_chunk *temp = (struct page_chunk *)pp;
     temp->pagecnt = cnt;
-    temp->next = free_chunk_list;
-    free_chunk_list = temp;
+    temp->next = NULL;
+
+    if (free_chunk_list == NULL ||
+        (uintptr_t)temp < (uintptr_t)free_chunk_list) {
+        temp->next = free_chunk_list;
+        free_chunk_list = temp;
+    } else {
+        struct page_chunk *prev = free_chunk_list;
+        struct page_chunk *curr = free_chunk_list->next;
+        while (curr != NULL && (uintptr_t)curr < (uintptr_t)temp) {
+            prev = curr;
+            curr = curr->next;
+        }
+        prev->next = temp;
+        temp->next = curr;
+    }
+
+    // Coalesce adjacent chunks.
+    for (struct page_chunk *curr = free_chunk_list;
+         curr != NULL && curr->next != NULL; ) {
+        uintptr_t curr_end = (uintptr_t)curr + curr->pagecnt * PAGE_SIZE;
+        uintptr_t next_start = (uintptr_t)curr->next;
+        if (curr_end == next_start) {
+            curr->pagecnt += curr->next->pagecnt;
+            curr->next = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
 }
 
 /*	Counts the number of pages remaining in the free chunk list.*/

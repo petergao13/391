@@ -24,7 +24,7 @@ void main(int argc, char* argv[]) {
 
     // parses through STDIN and addend args until we have MAXARGS (8)
     char buf[1024];
-    int read = _read(0, buf, 1024);
+    long read = _read(0, buf, sizeof(buf) - 1);
     if(read < 0){
         dprintf(2, "STDIN is invalid\n");
         _exit();
@@ -32,7 +32,7 @@ void main(int argc, char* argv[]) {
     buf[read] = '\0';
     char * head = buf;
     int found = 0;
-    for(int i = 0; i < read+1; i++){
+    for(int i = 0; i < (int)read + 1; i++){
         if(buf[i] != ' ' && buf[i] != '\n' && buf[i] != '\r' && buf[i] != '\0' && found == 0){
             head = &buf[i];
             found = 1;

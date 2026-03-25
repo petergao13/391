@@ -12,6 +12,8 @@
 #define DEBUG
 #endif
 
+#include <stddef.h>
+
 #include "cache.h"
 
 #include "conf.h"
@@ -35,6 +37,7 @@ struct cache_node {
     struct cache_node * prev;
     unsigned long long blk_pos;
     uint8_t dirty;
+    unsigned int refcnt; // pinned/refcounted by cache_get_block callers
 
     // struct lock lock;
 };
@@ -46,6 +49,13 @@ struct cache {
     int count; //number of items in our list. SHOULD NOT EXCEED 64
     struct lock lock;
 };
+
+// Max number of blocks in the cache.
+#define CACHE_MAX_NODES 64
+
+static inline struct cache_node *cache_node_from_pblk(void *pblk) {
+    return (struct cache_node *)((char *)pblk - offsetof(struct cache_node, data));
+}
 
 /**
  * @brief Creates/initializes a cache with the passed backing storage device (disk) and makes it
@@ -88,21 +98,31 @@ int create_cache(struct storage* disk, struct cache** cptr) {
  * @return 0 on success, negative error code if error
  */
 int cache_get_block(struct cache* cache, unsigned long long pos, void** pptr) {
-    // FIXME
-    if (pos % 512 != 0 || cache == NULL || pptr == NULL) {
+    if (pos % CACHE_BLKSZ != 0 || cache == NULL || pptr == NULL) {
         return -EINVAL;
     }
     
     lock_acquire(&cache->lock);
     
     //find block pos
-    unsigned long long blknum = pos/512;
+    unsigned long long blknum = pos / CACHE_BLKSZ;
     
     long result;
 
     //cache hit
     for(struct cache_node * curr = cache->head; curr != NULL; curr = curr->next){
         if(curr->blk_pos == blknum){
+            curr->refcnt++;
+            // Move-to-front to keep LRU-ish behavior.
+            if (curr != cache->head) {
+                if (curr->prev) curr->prev->next = curr->next;
+                if (curr->next) curr->next->prev = curr->prev;
+                if (cache->tail == curr) cache->tail = curr->prev;
+                curr->prev = NULL;
+                curr->next = cache->head;
+                if (cache->head) cache->head->prev = curr;
+                cache->head = curr;
+            }
             *pptr = curr->data;
             lock_release(&cache->lock);
             return 0;
@@ -111,33 +131,48 @@ int cache_get_block(struct cache* cache, unsigned long long pos, void** pptr) {
 
     //evict tail if cache is full
     //write back if tail is dirty
-    if(cache->count == 64){
-        if(cache->tail->dirty == 1){
-            result = cache->disc->intf->store(cache->disc, cache->tail->blk_pos*512, cache->tail->data, 512);
-            if(result < 512){
+    if(cache->count == CACHE_MAX_NODES){
+        // Don't evict pinned blocks; find the least-recently-used unpinned node.
+        struct cache_node * victim = cache->tail;
+        while (victim != NULL && victim->refcnt != 0) {
+            victim = victim->prev;
+        }
+        if (victim == NULL) {
+            lock_release(&cache->lock);
+            return -EBUSY;
+        }
+
+        if (victim->dirty == 1) {
+            result = cache->disc->intf->store(cache->disc, victim->blk_pos * CACHE_BLKSZ, victim->data, CACHE_BLKSZ);
+            if (result < CACHE_BLKSZ) {
                 lock_release(&cache->lock);
                 return -EIO;
             }
         }
-        cache->tail = cache->tail->prev;
-        kfree(cache->tail->next);
-        cache->tail->next = NULL;
+
+        // Unlink victim.
+        if (victim->prev) victim->prev->next = victim->next;
+        else cache->head = victim->next;
+        if (victim->next) victim->next->prev = victim->prev;
+        else cache->tail = victim->prev;
+
+        kfree(victim);
         cache->count--;
     }
 
     //read new node from disk
     struct cache_node * node = kcalloc(1, sizeof(struct cache_node));
     if(node == NULL){
-        kfree(node);
         lock_release(&cache->lock);
         return -ENOMEM;
     }
+    node->refcnt = 1;
     node->next = cache->head;
     node->prev = NULL;
     node->blk_pos = blknum;
     node->dirty = 0;
-    result = cache->disc->intf->fetch(cache->disc, node->blk_pos*512, node->data, 512);
-    if(result < 512){
+    result = cache->disc->intf->fetch(cache->disc, node->blk_pos*CACHE_BLKSZ, node->data, CACHE_BLKSZ);
+    if(result < CACHE_BLKSZ){
         kfree(node);
         lock_release(&cache->lock);
         return -EIO;
@@ -166,19 +201,14 @@ int cache_get_block(struct cache* cache, unsigned long long pos, void** pptr) {
  * @return 0 on success, negative error code if error
  */
 void cache_release_block(struct cache* cache, void* pblk, int dirty) {
-    // FIXME
     if (cache == NULL || pblk == NULL) {
         return;
     }
 
     lock_acquire(&cache->lock);
-
-    //iterate through every node and compare
-    for(struct cache_node * curr = cache->head; curr != NULL; curr = curr->next){
-        if(curr->data == pblk){
-            curr->dirty |= dirty;
-        }
-    }
+    struct cache_node *node = cache_node_from_pblk(pblk);
+    if (dirty) node->dirty = 1;
+    if (node->refcnt > 0) node->refcnt--;
     lock_release(&cache->lock);
 }
 
@@ -198,8 +228,8 @@ int cache_flush(struct cache* cache) {
     //iterate through every node and compare
     for(struct cache_node * curr = cache->head; curr != NULL; curr = curr->next){
         if(curr->dirty == 1){
-            long result = cache->disc->intf->store(cache->disc, curr->blk_pos*512, curr->data, 512);
-            if(result < 512){
+            long result = cache->disc->intf->store(cache->disc, curr->blk_pos*CACHE_BLKSZ, curr->data, CACHE_BLKSZ);
+            if(result < CACHE_BLKSZ){
                 lock_release(&cache->lock);
                 return -EIO;
             }

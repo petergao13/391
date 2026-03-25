@@ -12,7 +12,7 @@ void main(int argc, char* argv[]) {
     }
 
     char buf[512];
-    int bytesRead;
+    long bytesRead;
 
     unsigned long long byteCount = 0; 
     unsigned long long wordCount = 0;
@@ -20,9 +20,9 @@ void main(int argc, char* argv[]) {
 
     int wordFlag = 0;
     
-    while ((bytesRead = _read(fd, buf, 512)) > 0) {
+    while ((bytesRead = _read(fd, buf, sizeof(buf) - 1)) > 0) {
         buf[bytesRead] = '\0';
-        for (int i = 0; i < bytesRead+1; i++) {
+        for (int i = 0; i < (int)bytesRead + 1; i++) {
             if (buf[i] != '\0') {
                 byteCount++;
             }

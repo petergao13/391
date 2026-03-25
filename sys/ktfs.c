@@ -70,7 +70,9 @@ static struct ktfs_data_block * getDataBlock(uint32_t block_index);
 static void releaseInodeBlock(struct ktfs_data_block * blockptr, int dirty);
 static void releaseDataBlock(struct ktfs_data_block * blockptr, int dirty);
 static void releaseBitmapBlock(struct ktfs_bitmap * blockptr, int dirty);
-static int getDentryBlockWithIndex(struct ktfs_data_block ** dentry_block, uint32_t dentry_index);
+static int getDentryBlockWithIndex(struct ktfs_data_block ** dentry_block,
+                                     const struct ktfs_inode root_inode,
+                                     uint32_t dentry_index);
 static int getDentryWithName(struct ktfs_dir_entry * dentry, const char * name);
 static int getDentryBlockWithName(struct ktfs_data_block ** dentry_block_ptr, uint32_t * dentry_index_ptr, const char * name);
 static int changeFileSize(struct ktfs_file * file, unsigned long long new_size);
@@ -110,21 +112,34 @@ static const struct uio_intf ktfs_listing_intf = {
 static struct ktfs_file * openedFileList = NULL;
 static struct ktfs_file * openedListingList = NULL;
 static struct cache * ktfs_cache = NULL;
+static struct ktfs_superblock ktfs_sb_cache;
+static int ktfs_sb_cached = 0;
 
 //HELPER FUNCTIONS
 static struct ktfs_superblock getSuperblock(){
+    if (ktfs_sb_cached) {
+        return ktfs_sb_cache;
+    }
     void * buffer;
-    cache_get_block(ktfs_cache, 0, &buffer);
+    int rc = cache_get_block(ktfs_cache, 0, &buffer);
+    if (rc < 0) {
+        panic("ktfs: failed to read superblock from cache");
+    }
     struct ktfs_superblock superblock;
     memcpy((void *)&superblock, buffer, sizeof(struct ktfs_superblock));
     cache_release_block(ktfs_cache, buffer, 0);
+    ktfs_sb_cache = superblock;
+    ktfs_sb_cached = 1;
     return superblock;
 }
 
 static struct ktfs_bitmap * getInodeBitmap(uint32_t inode_bitmap_block_index){
     uint32_t block_index = 1 + inode_bitmap_block_index;
     struct ktfs_bitmap * bitmap;
-    cache_get_block(ktfs_cache, block_index*512, (void**)&bitmap);
+    int rc = cache_get_block(ktfs_cache, block_index*512, (void**)&bitmap);
+    if (rc < 0) {
+        panic("ktfs: failed to read inode bitmap from cache");
+    }
     return bitmap;
 }
 
@@ -132,7 +147,10 @@ static struct ktfs_bitmap * getDataBitmap(uint32_t data_bitmap_block_index){
     struct ktfs_superblock superblock = getSuperblock();
     uint32_t block_index = 1 + superblock.inode_bitmap_block_count + data_bitmap_block_index;
     struct ktfs_bitmap * bitmap;
-    cache_get_block(ktfs_cache, block_index*512, (void**)&bitmap);
+    int rc = cache_get_block(ktfs_cache, block_index*512, (void**)&bitmap);
+    if (rc < 0) {
+        panic("ktfs: failed to read data bitmap from cache");
+    }
     return bitmap;
 }
 
@@ -142,7 +160,10 @@ static struct ktfs_inode getInode(uint16_t inode_index){
     unsigned long long inode_block_index = 1 + superblock.inode_bitmap_block_count + superblock.bitmap_block_count + (inode_index/16); //each inode block can have 16 inodes in it, gets which inode block 
     unsigned long long inode_block_offset = inode_index%16; //offset within inode block
     void * buffer;
-    cache_get_block(ktfs_cache, inode_block_index*512, &buffer);
+    int rc = cache_get_block(ktfs_cache, inode_block_index*512, &buffer);
+    if (rc < 0) {
+        panic("ktfs: failed to read inode block from cache");
+    }
     struct ktfs_inode * inode_array = (struct ktfs_inode *)buffer;
     struct ktfs_inode inode = inode_array[inode_block_offset];
     cache_release_block(ktfs_cache, buffer, 0);
@@ -153,7 +174,10 @@ static struct ktfs_data_block * getInodeBlock(uint16_t inode_index){
     struct ktfs_superblock superblock = getSuperblock();
     unsigned long long inode_block_index = 1 + superblock.inode_bitmap_block_count + superblock.bitmap_block_count + (inode_index/16); //each inode block can have 16 inodes in it, gets which inode block 
     struct ktfs_data_block * inode_block;
-    cache_get_block(ktfs_cache, inode_block_index*512, (void**)&inode_block);
+    int rc = cache_get_block(ktfs_cache, inode_block_index*512, (void**)&inode_block);
+    if (rc < 0) {
+        panic("ktfs: failed to read inode data block from cache");
+    }
     return inode_block;
 }
 
@@ -161,7 +185,10 @@ static struct ktfs_data_block * getDataBlock(uint32_t block_index){
     struct ktfs_superblock superblock = getSuperblock();
     unsigned long long data_block_index = 1 + superblock.inode_bitmap_block_count + superblock.bitmap_block_count + superblock.inode_block_count + block_index;
     struct ktfs_data_block * data_block;
-    cache_get_block(ktfs_cache, data_block_index*512, (void**)&data_block);
+    int rc = cache_get_block(ktfs_cache, data_block_index*512, (void**)&data_block);
+    if (rc < 0) {
+        panic("ktfs: failed to read data block from cache");
+    }
     return data_block;
 }
 
@@ -177,9 +204,9 @@ static void releaseBitmapBlock(struct ktfs_bitmap * blockptr, int dirty){
     cache_release_block(ktfs_cache, blockptr, dirty);
 }
 
-static int getDentryBlockWithIndex(struct ktfs_data_block ** dentry_block, uint32_t dentry_index){
-    struct ktfs_superblock superblock = getSuperblock();
-    struct ktfs_inode root_inode = getInode(superblock.root_directory_inode);
+static int getDentryBlockWithIndex(struct ktfs_data_block ** dentry_block,
+                                    const struct ktfs_inode root_inode,
+                                    uint32_t dentry_index){
     uint32_t dentry_block_index = dentry_index/32;
     if(dentry_block_index < 4){   // 0-3  direct
         *dentry_block = getDataBlock(root_inode.block[dentry_block_index]);
@@ -210,8 +237,8 @@ static int getDentryWithName(struct ktfs_dir_entry * dentry, const char * name){
     struct ktfs_inode root_inode = getInode(superblock.root_directory_inode);
     uint32_t dentry_count = root_inode.size/sizeof(struct ktfs_dir_entry);
     struct ktfs_data_block * dentry_block;
-    for(uint32_t dentry_index = 0; dentry_index <= dentry_count; dentry_index++){
-        int retVal = getDentryBlockWithIndex(&dentry_block, dentry_index);
+    for(uint32_t dentry_index = 0; dentry_index < dentry_count; dentry_index++){
+        int retVal = getDentryBlockWithIndex(&dentry_block, root_inode, dentry_index);
         struct ktfs_dir_entry * dentry_array = (struct ktfs_dir_entry *)dentry_block->data;
         if(retVal == 0){
             if(strcmp(name, dentry_array[dentry_index%32].name) == 0){
@@ -236,8 +263,8 @@ static int getDentryBlockWithName(struct ktfs_data_block ** dentry_block_ptr, ui
     struct ktfs_inode root_inode = getInode(superblock.root_directory_inode);
     uint32_t dentry_count = root_inode.size/sizeof(struct ktfs_dir_entry);
     struct ktfs_data_block * dentry_block;
-    for(uint32_t dentry_index = 0; dentry_index <= dentry_count; dentry_index++){
-        int retVal = getDentryBlockWithIndex(&dentry_block, dentry_index);
+    for(uint32_t dentry_index = 0; dentry_index < dentry_count; dentry_index++){
+        int retVal = getDentryBlockWithIndex(&dentry_block, root_inode, dentry_index);
         struct ktfs_dir_entry * dentry_array = (struct ktfs_dir_entry *)dentry_block->data;
         if(retVal == 0){
             if(strcmp(name, dentry_array[dentry_index%32].name) == 0){
@@ -448,6 +475,7 @@ int mount_ktfs(const char* name, struct cache* cache) {
         return -EINVAL; 
     }
     ktfs_cache = cache; //connect the cache NOT USED FOR NOW, JUST CALL VIOBLK FUNCTIONS RIGHT NOW
+    ktfs_sb_cached = 0; // ensure fresh superblock read if remounted
     return attach_filesystem(name, (struct filesystem*)&ktfs);
 }
 
@@ -770,7 +798,7 @@ int ktfs_create(struct filesystem* fs, const char* name) {
     }
 
     struct ktfs_data_block * dentry_block;
-    retVal = getDentryBlockWithIndex(&dentry_block, last_dentry_index);
+    retVal = getDentryBlockWithIndex(&dentry_block, *root_inode, last_dentry_index);
     if(retVal != 0){
         releaseInodeBlock(root_inode_block, 1);
         return retVal;
@@ -836,7 +864,7 @@ int ktfs_delete(struct filesystem* fs, const char* name) {
 
     // get last dentry
     struct ktfs_data_block * dentry2_block;
-    retVal = getDentryBlockWithIndex(&dentry2_block, last_dentry_index);
+    retVal = getDentryBlockWithIndex(&dentry2_block, *root_inode, last_dentry_index);
     if(retVal != 0){
         releaseDataBlock(dentry1_block, 1);
         return retVal;
@@ -1005,7 +1033,7 @@ long ktfs_listing_read(struct uio* uio, void* buf, unsigned long bufsz) {
     }
 
     struct ktfs_data_block * dentry_block;
-    getDentryBlockWithIndex(&dentry_block, file->pos);
+    getDentryBlockWithIndex(&dentry_block, root_inode, file->pos);
     struct ktfs_dir_entry * dentry_array = (struct ktfs_dir_entry *)dentry_block;
     releaseDataBlock(dentry_block, 0);
     struct ktfs_dir_entry dentry = dentry_array[file->pos%32];
