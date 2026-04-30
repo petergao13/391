@@ -9,9 +9,13 @@
 
 ## Running the OS
 
-### On macOS (Docker)
+### On macOS (Docker) — work in progress
 
-Docker is required. Start Docker Desktop, then:
+The Mac/Docker path is being set up. The kernel requires a custom-patched
+QEMU 9.0.2 (the `Imports/qemu.patch` from the course), which the Dockerfile
+now builds from source in a multi-stage build. Boot is being verified end-
+to-end; until that lands, the Linux instructions below are the supported
+path.
 
 ```bash
 ./run.sh        # build and launch the OS in QEMU
@@ -19,9 +23,6 @@ Docker is required. Start Docker Desktop, then:
 ./gdb.sh        # attach gdb-multiarch (second terminal, while debug.sh is running)
 ./shell.sh      # open a bash shell inside the build container
 ```
-
-The scripts build a `linux/amd64` container (Debian Bookworm) with the full
-RISC-V toolchain and QEMU. All build artifacts stay in the project directory.
 
 Press **Ctrl-A X** to quit QEMU. Press **Ctrl-A C** to toggle the QEMU monitor.
 
