@@ -21,14 +21,9 @@ A custom RISC-V operating system kernel with a user-mode shell, a block-cached f
 
 ## Prerequisites
 
-You need a RISC-V bare-metal GCC toolchain and `qemu-system-riscv64`.
+> **Verified platform:** Ubuntu Linux, x86-64. This is the only OS the project is confirmed to build and boot on. Other Linux distros should work with equivalent package names, but have not been tested. macOS is not supported at this time.
 
-### macOS (Homebrew)
-```bash
-brew tap riscv-software-src/riscv
-brew install riscv-tools qemu screen
-```
-The toolchain must provide `riscv64-unknown-elf-gcc`, `riscv64-unknown-elf-as`, `riscv64-unknown-elf-ld`, `riscv64-unknown-elf-objcopy`, and `riscv64-unknown-elf-objdump`.
+You need a RISC-V bare-metal GCC toolchain and `qemu-system-riscv64`.
 
 ### Ubuntu / Debian
 ```bash
@@ -38,6 +33,8 @@ sudo apt install -y \
   gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
   qemu-system-misc screen
 ```
+
+The toolchain must provide `riscv64-unknown-elf-gcc`, `riscv64-unknown-elf-as`, `riscv64-unknown-elf-ld`, `riscv64-unknown-elf-objcopy`, and `riscv64-unknown-elf-objdump`.
 
 ### Verify
 ```bash
@@ -194,4 +191,3 @@ What each piece is for:
 - **`screen: /dev/pts/N: Permission denied`** — use `sudo screen /dev/pts/N`, or run the kernel as your own user and re-check the pts number QEMU printed.
 - **`riscv64-unknown-elf-gcc: command not found`** — the toolchain is not installed or not on your PATH. Re-check Prerequisites.
 - **QEMU exits immediately / no PTY printed** — make sure `./mkfs-image.sh` completed without errors before the `make -C sys run` step; the FS image must exist at `sys/ktfs.raw`.
-- **Apple Silicon Macs** — `qemu-system-riscv64` runs natively (it is an emulator, not a VM), so Rosetta is not required.
