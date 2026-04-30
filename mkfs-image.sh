@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-cd usr
-make clean && make all
+set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+make -C usr clean
+make -C usr all
 
 util/mkfs_ktfs sys/ktfs.raw 8M 32 \
   usr/bin/shell \
@@ -14,7 +18,10 @@ util/mkfs_ktfs sys/ktfs.raw 8M 32 \
   usr/bin/rm \
   usr/bin/xargs \
   usr/bin/hello \
-  usr/games/trek
+  usr/games/trek \
+  usr/games/rogue \
+  usr/games/zork \
+  usr/games/dtextc.dat
 
-cd ../sys
-make clean && make run
+make -C sys clean
+exec make -C sys run
